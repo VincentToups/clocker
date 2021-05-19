@@ -201,7 +201,7 @@
        ((list 'task-line state name current-duration)
 	(with-temp-buffer
 	  (insert (format "\"out\", %d, %S, %S" now name comment))
-	  (write-region (format "events/%d.csv" now) (point-min) (point-max)))
+	  (write-region (point-min) (point-max) (format "events/%d.csv" now)))
 	(setf (elt parsed-lines active-line)
 	      (list 'task-line "-" name (clocker--add-durations elapsed current-duration)))))
      (setf (elt parsed-rep 2) parsed-lines)
