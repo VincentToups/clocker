@@ -1,28 +1,27 @@
 (require 'shadchen)
 (require 'iso8601)
 
-(iso8601-parse-duration "P10Y9M8DT7H6M5S")
-
 (defun clocker--iso8601-parse-duration (str)
   (clocker--normalize-duration (iso8601-parse-duration str)))
 
-(defun clocker--iso8601-duration->string (parsed-duration)
-  (defun all-zero? (lst)
+(defun clocker--all-zero? (lst)
     (cond ((eq lst '()) t)
           ((eq (car lst) 0)
-           (all-zero? (cdr lst)))
+           (clocker--all-zero? (cdr lst)))
           (:else nil)))
-  (defun mapconcat (f &rest args)
-    (apply #'concat (apply #'cl-mapcar (cons f args))))
-  (defun encode-part (numbers sigils)
-    (mapconcat (lambda (n s)
-                 (cond ((= n 0) "")
-                       (:else (concat (format "%S" n) s))))
-               numbers sigils))
+(defun clocker--mapconcat (f &rest args)
+  (apply #'concat (apply #'cl-mapcar (cons f args))))
+(defun clocker--encode-part (numbers sigils)
+  (clocker--mapconcat (lambda (n s)
+               (cond ((= n 0) "")
+                     (:else (concat (format "%S" n) s))))
+             numbers sigils))
+
+(defun clocker--iso8601-duration->string (parsed-duration)  
   (match parsed-duration
          ((list seconds minutes hours days months years nil nil nil)
-          (let ((before-t-part (encode-part (list years months days) (list "Y" "M" "D")))
-                (after-t-part (encode-part (list hours minutes seconds) (list "H" "M" "S"))))
+          (let ((before-t-part (clocker--encode-part (list years months days) (list "Y" "M" "D")))
+                (after-t-part (clocker--encode-part (list hours minutes seconds) (list "H" "M" "S"))))
             (cond ((and (equal before-t-part "")
                         (equal after-t-part ""))
                    "PT0S")
@@ -50,6 +49,11 @@
                    (let 
                      (total-time (clocker--iso8601-parse-duration "PT0S")))))
           (list 'task-line active-flag task-name total-time))))
+
+(defpattern clocker--task-line (flag task-name total-time)
+  `(list (and ,flag (or "-" "*"))
+	 ,task-name
+	 ,total-time))
 
 (defun clocker--parsed-task-line? (parsed)
     (eq (car parsed) 'task-line))
@@ -179,6 +183,10 @@
 (defun clocker--parsed-buffer-lines (parsed-rep)
   (copy-list (elt parsed-rep 2)))
 
+
+(defun clocker--task-line-name (ln)
+  (elt ln 2))
+
  (defun clocker--clock-out (parsed-rep ln)
    (assert (clocker--last-event))
    (assert (clocker--parsed-buffer-active-task parsed-rep))
@@ -186,16 +194,23 @@
           (parsed-lines (clocker--parsed-buffer-lines parsed-rep))
           (now (time-convert (current-time) 'integer))
           (last-time (clocker--last-event-time))
-          (elapsed (clocker--iso8601-parse-duration "PT%sS" (- now last-time))))
-     (match (elt parsed-lines (clocker--parsed-buffer-active-task parsed-rep))
-            ())
-     (setf (elt parsed-ref 2) parsed-lines)     
+          (elapsed (clocker--iso8601-parse-duration (format "PT%sS" (- now last-time))))
+	  (active-line (clocker--parsed-buffer-active-task parsed-rep))
+	  (comment (read-string (format "Comment (out %s):" (clocker--task-line-name (elt parsed-lines active-line))))))
+     (match (elt parsed-lines active-line)
+       ((list 'task-line state name current-duration)
+	(with-temp-buffer
+	  (insert (format "\"out\", %d, %S, %S" now name comment))
+	  (write-region (format "events/%d.csv" now) (point-min) (point-max)))
+	(setf (elt parsed-lines active-line)
+	      (list 'task-line "-" name (clocker--add-durations elapsed current-duration)))))
+     (setf (elt parsed-rep 2) parsed-lines)
      parsed-rep))
 
 (defun clocker--clock-in (parsed-rep ln)
   (let* ((line (elt (elt parsed-rep 2) ln))
          (now (time-convert (current-time) 'integer))
-         (comment (read-string "Comment: "))
+         (comment (read-string (format "Comment (in %s): " (clocker--task-line-name line))))
          (filename (format "events/%d.csv" now)))
     (clocker--ensure-directory "events")
     (with-temp-buffer
@@ -250,7 +265,8 @@
                          (not (eq active ln)))
                     (message (format "Clocking out of %S" (clocker--task-name (elt parsed-lines active))))
                     (message (format "Clocking in to %S" (clocker--task-name (elt parsed-lines ln))))
-                    (clocker--clock-out parsed active)
+                    (setq parsed (clocker--clock-out parsed active))
+		    (setq parsed-lines (clocker--parsed-buffer-lines parsed))
                     (when (clocker--parsed-task-line? (elt parsed-lines ln))
                       (clocker--clock-in parsed ln)))
                    ((and (not active)
