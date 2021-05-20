@@ -282,6 +282,75 @@
 (cl-defmacro clocker--dont (&body terms)
   nil)
 
+(defun clocker--current-directory ()
+  (replace-regexp-in-string "^Directory " "" (pwd)))
+
+(defun clocker--list-event-files ()
+  (cl-loop for file in (directory-files "events" nil "[0-9]+\.csv")
+           collect (concat "events/" file)))
+
+(defun clocker--edit-events-as-org-table ()
+  (interactive)
+  (let ((wd (clocker--current-directory))
+        (buffer (get-buffer-create "*clocker-events*"))
+        (files (clocker--list-event-files)))
+    (with-current-buffer buffer
+      (cd wd)
+      (delete-region (point-min) (point-max))
+      (insert (format "event-type, timestamp, task-name, comment\n"))
+      (cl-loop for file in files do
+               (insert-file file)
+               (goto-char (point-max))
+               (insert (format "\n")))
+      (goto-char (point-min))
+      (org-table-convert-region (point-min) (point-max))
+      (org-mode))
+    (pop-to-buffer buffer)))
+
+(defun clocker--delete-all-events ()
+  (let ((r (y-or-n-p "This will delete all event logs. Hope you have a git repo!")))
+    (if r
+        (progn
+          (cl-loop for file in (clocker--list-event-files) do
+                   (delete-file file))
+          t)
+      nil)))
+
+(defun clocker--write-org-table-events-out ()
+  (interactive)
+  (cond ((not (clocker--delete-all-events))
+         (message "Didn't write org table out to events."))
+        (:else
+         (with-current-buffer (get-buffer "*clocker-events*")
+           (let ((lines (cdr (split-string (buffer-substring-no-properties (point-min) (point-max))
+                                           (format "\n")))))
+             (cl-loop for line in lines do
+                      (match (split-string line (regexp-quote "|") t "[[:space:]]*")
+                        ((list event-type timestamp task-name comment)
+                         (with-temp-buffer
+                           (insert (format "%S, %d, %S, %S"
+                                           event-type
+                                           (string-to-number timestamp)
+                                           task-name
+                                           comment))
+                           (write-region (point-min) (point-max)
+                                         (format "events/%d.csv" (string-to-number timestamp)))))
+                        (anything-else (message "Ignoring %s" anything-else)))))))))
+
+(define-minor-mode clocker-mode
+  "Toggle clocker-mode
+Clocker mode is a simple time tracker. It tracks total time on each task 
+and creates a log of clock in and out events."
+ ;; The initial value.
+ :init-value nil
+ ;; The indicator for the mode line.
+ :lighter " clocker"
+ ;; The minor mode bindings.
+ :keymap
+ '(([C-c C-c] . clocker--go)))
+
+(define-key clocker-mode-map (kbd "C-c C-c") 'clocker--go)
+
 (clocker--dont
  (with-current-buffer (find-file "./test/tasks.txt")
    (goto-line 1)
@@ -289,4 +358,20 @@
  (with-current-buffer (find-file-noselect "./test/tasks.txt")
    (clocker--last-event))
  (with-current-buffer (find-file-noselect "./test/tasks.txt")
-   (clocker--last-event-time)))
+   (clocker--last-event-time))
+ (with-current-buffer (find-file-noselect "./test/tasks.txt")
+   (let ((files (directory-files "events" nil "[0-9]+\.csv")))
+     (with-temp-buffer
+       (insert (format "event-type, timestamp, task-name, comment\n"))
+       (cl-loop for file in files do
+                (insert-file (concat "events/" file))
+                (goto-char (point-max))
+                (insert (format "\n")))
+       (goto-char (point-min))
+       (org-table-convert-region (point-min) (point-max))
+       (write-region (point-min) (point-max) "/tmp/test.org"))))
+ (with-current-buffer (get-buffer "*clocker-events*")
+   (clocker--write-org-table-events-out)))
+
+(provide 'clocker)
+
