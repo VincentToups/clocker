@@ -1,5 +1,14 @@
 (require 'shadchen)
 (require 'iso8601)
+(require 'parse-csv)
+
+(defun clocker--parse-csv-event-line (line)
+  (match (parse-csv-string line ?, ?\")
+    ((list event-type time task-name comment)
+     (list (clocker--trim event-type)
+           (string-to-number (clocker--trim time))
+           (clocker--trim task-name)
+           (clocker--trim comment)))))
 
 (defun clocker--iso8601-parse-duration (str)
   (clocker--normalize-duration (iso8601-parse-duration str)))
@@ -289,10 +298,8 @@
   (cl-loop for file in (directory-files "events" nil "[0-9]+\.csv")
            collect (concat "events/" file)))
 
-(defun clocker--edit-events-as-org-table ()
-  (interactive)
+(defun clocker--put-events-into-buffer-as-org-table (buffer)
   (let ((wd (clocker--current-directory))
-        (buffer (get-buffer-create "*clocker-events*"))
         (files (clocker--list-event-files)))
     (with-current-buffer buffer
       (cd wd)
@@ -303,9 +310,14 @@
                (goto-char (point-max))
                (insert (format "\n")))
       (goto-char (point-min))
-      (org-table-convert-region (point-min) (point-max))
-      (org-mode))
-    (pop-to-buffer buffer)))
+      (org-mode)
+      (org-table-convert-region (point-min) (point-max)))
+    buffer))
+
+(defun clocker--edit-events-as-org-table (&optional buffer)
+  (interactive)
+  (pop-to-buffer
+   (clocker--put-events-into-buffer-as-org-table (get-buffer-create "*clocker-events*"))))
 
 (defun clocker--delete-all-events ()
   (let ((r (y-or-n-p "This will delete all event logs. Hope you have a git repo!")))
@@ -349,6 +361,63 @@ and creates a log of clock in and out events."
  :keymap
  '(([C-c C-c] . clocker--go)))
 
+(defun clocker--parsed-buffer-get-tasks (pb)
+  (if (eq pb nil)
+      (clocker--parsed-buffer-get-tasks (clocker--parse-current-buffer)))
+  (cl-loop for line in (clocker--parsed-buffer-lines pb)
+           when (clocker--parsed-task-line? line)
+           collect line))
+
+(defun clocker--parsed-buffer-get-task (pb task-name)
+  (if (eq pb nil)
+      (clocker--parsed-buffer-get-task (clocker--parse-current-buffer)))
+  (let ((out (cl-loop for line in (clocker--parsed-buffer-lines pb)
+                      when (and (clocker--parsed-task-line? line)
+                                (equal (clocker--task-line-name
+                                        line) task-name))
+                      collect line)))
+    (cond
+     ((eq out '()) nil)
+     ((eq (cdr out) '()) (car out))
+     (:else
+      (error (format "This buffer has duplicate tasks by the name of %S." task-name))))))
+
+(defun clocker--slurp-file (file)
+  (with-temp-buffer
+    (insert-file file)
+    (goto-char (point-min))
+    (buffer-substring-no-properties (point-min) (point-max))))
+
+(defun clocker--get-events-as-list ()
+  (cl-loop for file in (clocker--list-event-files)
+           collect (clocker--parse-csv-event-line
+                    (clocker--slurp-file file))))
+
+(defun clocker--parsed-event-task-name (pe)
+  (elt pe 2))
+
+(defun clocker--parsed-event-sorter (a b)
+  (< (elt a 1)
+     (elt b 1)))
+
+(defun clocker--get-events-in-task-groups ()
+  (let ((events (clocker--get-events-as-list))
+        (output (make-hash-table :test 'equal)))
+    (cl-labels ((keycons (key value)
+                         (let ((cv (gethash key output nil)))
+                           (puthash key (cons value cv) output))))
+      (cl-loop for event in events
+               do
+               (keycons (clocker--parsed-event-task-name event)
+                        event)))
+    (cl-loop for key in (hash-table-keys output)
+             collect (cons key (sort (gethash key output)
+                            #'clocker--parsed-event-sorter)))))
+
+(defun clocker--recalculate-durations ()
+  (let ((files (clocker--list-event-files))
+        (parsed (clocker--parse-current-buffer)))))
+
 (define-key clocker-mode-map (kbd "C-c C-c") 'clocker--go)
 
 (clocker--dont
@@ -358,7 +427,13 @@ and creates a log of clock in and out events."
  (with-current-buffer (find-file-noselect "./test/tasks.txt")
    (clocker--last-event))
  (with-current-buffer (find-file-noselect "./test/tasks.txt")
+   (clocker--parsed-buffer-get-tasks (clocker--parse-current-buffer)))
+ (with-current-buffer (find-file-noselect "./test/tasks.txt")
+   (clocker--parsed-buffer-get-task (clocker--parse-current-buffer) "work-on-clocker")) 
+ (with-current-buffer (find-file-noselect "./test/tasks.txt")
    (clocker--last-event-time))
+ (with-current-buffer (find-file-noselect "./test/tasks.txt")
+   (clocker--get-events-in-task-groups))
  (with-current-buffer (find-file-noselect "./test/tasks.txt")
    (let ((files (directory-files "events" nil "[0-9]+\.csv")))
      (with-temp-buffer
