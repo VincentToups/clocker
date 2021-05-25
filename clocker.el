@@ -13,6 +13,9 @@
 (defun clocker--iso8601-parse-duration (str)
   (clocker--normalize-duration (iso8601-parse-duration str)))
 
+(defun clocker--seconds-to-iso8601-duration (s)
+  (clocker--iso8601-parse-duration (format "PT%SS" s)))
+
 (defun clocker--all-zero? (lst)
     (cond ((eq lst '()) t)
           ((eq (car lst) 0)
@@ -65,7 +68,10 @@
 	 ,total-time))
 
 (defun clocker--parsed-task-line? (parsed)
-    (eq (car parsed) 'task-line))
+  (eq (car parsed) 'task-line))
+
+(defun clocker--parsed-task-line-task-name (parsed)
+  (elt parsed 2))
 
 (defun clocker--parsed-line->string (parsed)
   (format "%s %s %s" (elt parsed 1)
@@ -396,9 +402,12 @@ and creates a log of clock in and out events."
 (defun clocker--parsed-event-task-name (pe)
   (elt pe 2))
 
+(defun clocker--parsed-event-get-time (pe)
+  (elt pe 1))
+
 (defun clocker--parsed-event-sorter (a b)
-  (< (elt a 1)
-     (elt b 1)))
+  (< (clocker--parsed-event-get-time a)
+     (clocker--parsed-event-get-time b)))
 
 (defun clocker--get-events-in-task-groups ()
   (let ((events (clocker--get-events-as-list))
@@ -412,11 +421,33 @@ and creates a log of clock in and out events."
                         event)))
     (cl-loop for key in (hash-table-keys output)
              collect (cons key (sort (gethash key output)
-                            #'clocker--parsed-event-sorter)))))
+                                     #'clocker--parsed-event-sorter)))))
+
+(defun clocker--get-task-durations-from-events ()
+  (let ((events-data (clocker--get-events-in-task-groups)))
+    (cl-loop for event-data in events-data collect
+             (cons (car event-data)
+                   (clocker--seconds-to-iso8601-duration
+                    (- (clocker--parsed-event-get-time (car (reverse (cdr event-data))))
+                       (clocker--parsed-event-get-time (cadr event-data))))))))
+
+(gv-define-setter clocker--parsed-buffer-lines (pb new-value)
+  `(progn (setf (elt ,pb 2) ,new-value) ,new-value))
 
 (defun clocker--recalculate-durations ()
-  (let ((files (clocker--list-event-files))
-        (parsed (clocker--parse-current-buffer)))))
+  (let* ((event-data (clocker--get-task-durations-from-events))
+         (pb (clocker--parse-current-buffer))
+         (pbl (clocker--parsed-buffer-lines pb)))
+    (setf (clocker--parsed-buffer-lines pb)
+          (cl-loop for line in pbl
+                   collect
+                   (match line
+                     ((list 'task-line task-name duration)
+                      (if (assoc task-name event-data)
+                          (list 'task-line task-name (cdr (assoc task-name event-data)))
+                        line))
+                     (everything-else everything-else))))
+    (clocker--rewrite-buffer pb)))
 
 (define-key clocker-mode-map (kbd "C-c C-c") 'clocker--go)
 
@@ -434,6 +465,8 @@ and creates a log of clock in and out events."
    (clocker--last-event-time))
  (with-current-buffer (find-file-noselect "./test/tasks.txt")
    (clocker--get-events-in-task-groups))
+ (with-current-buffer (find-file-noselect "./test/tasks.txt")
+   (clocker--get-task-durations-from-events))
  (with-current-buffer (find-file-noselect "./test/tasks.txt")
    (let ((files (directory-files "events" nil "[0-9]+\.csv")))
      (with-temp-buffer
