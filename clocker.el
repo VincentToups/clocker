@@ -311,10 +311,18 @@
       (cd wd)
       (delete-region (point-min) (point-max))
       (insert (format "event-type, timestamp, task-name, comment\n"))
+      ;; (cl-loop for file in files do
+      ;;          (insert-file file)
+      ;;          (goto-char (point-max))
+      ;;          (insert (format "\n")))
       (cl-loop for file in files do
-               (insert-file file)
-               (goto-char (point-max))
-               (insert (format "\n")))
+               (match (clocker--chain $ (clocker--slurp-file file)
+                                      (clocker--parse-csv-event-line $))
+                 ((list event-type
+                        (funcall #'clocker--epoch-to-readable-time time-string)
+                        task-name
+                        comment)
+                  (insert (format "%S, %S, %S, %S\n" event-type time-string task-name comment)))))
       (goto-char (point-min))
       (org-mode)
       (org-table-convert-region (point-min) (point-max)))
@@ -344,15 +352,16 @@
                                            (format "\n")))))
              (cl-loop for line in lines do
                       (match (split-string line (regexp-quote "|") t "[[:space:]]*")
-                        ((list event-type timestamp task-name comment)
+                        ((list event-type (funcall #'clocker--parse-readable-time timestamp)
+                               task-name comment)
                          (with-temp-buffer
                            (insert (format "%S, %d, %S, %S"
                                            event-type
-                                           (string-to-number timestamp)
+                                           timestamp
                                            task-name
                                            comment))
                            (write-region (point-min) (point-max)
-                                         (format "events/%d.csv" (string-to-number timestamp)))))
+                                         (format "events/%d.csv" timestamp))))
                         (anything-else (message "Ignoring %s" anything-else)))))))))
 
 (define-minor-mode clocker-mode
@@ -428,25 +437,66 @@ and creates a log of clock in and out events."
     (cl-loop for event-data in events-data collect
              (cons (car event-data)
                    (clocker--seconds-to-iso8601-duration
-                    (- (clocker--parsed-event-get-time (car (reverse (cdr event-data))))
-                       (clocker--parsed-event-get-time (cadr event-data))))))))
+                    (match-let ((events (cdr event-data))
+                               (acc 0))
+                     (match events
+                       ((list) acc)
+                       ((list (list* "out" time-out _))
+                        acc)
+                       ((list (list* "in" time-in _))
+                        acc)
+                       ((list* (list* "out" time-out _)
+                               rest)
+                        (recur rest acc))
+                       ((list* (and first-in (list* "in" time-in rest-event))
+                               (list* "in" other-in _) rest)
+                        (recur (cons first-in rest) acc))
+                       ((list* (list* "in" time-in _)
+                               (list* "out" time-out _)
+                               rest)
+                        (recur rest
+                               (+ acc (- time-out time-in)))))))))))
 
 (gv-define-setter clocker--parsed-buffer-lines (pb new-value)
   `(progn (setf (elt ,pb 2) ,new-value) ,new-value))
 
+;; YYYY-MM-DDTHH:MM:SS
+(defun clocker--epoch-to-readable-time (ep)
+  (format-time-string "%Y-%m-%dT%I:%M:%S %p" ep))
+
+(defun clocker--parse-readable-time (string)
+  (cl-labels ((->n (a) (string-to-number a)))
+    (match (split-string string "[-T: ]")
+      ((list y mo d h12 mi s am/pm)
+       (clocker--chain $
+                       (parse-iso8601-time-string
+                        (format "%0.4d-%0.2d-%0.2dT%0.2d:%0.2d:%0.2d"
+                                (->n y)
+                                (->n mo)
+                                (->n d)
+                                (+ (->n h12) (if (equal (downcase am/pm) "am") 0 12))
+                                (->n mi)
+                                (->n s)))
+                       (time-convert $ 'integer))))))
+
 (defun clocker--recalculate-durations ()
+  (interactive)
   (let* ((event-data (clocker--get-task-durations-from-events))
          (pb (clocker--parse-current-buffer))
          (pbl (clocker--parsed-buffer-lines pb)))
-    (setf (clocker--parsed-buffer-lines pb)
+    (setf (elt pb 2)
           (cl-loop for line in pbl
                    collect
                    (match line
-                     ((list 'task-line task-name duration)
-                      (if (assoc task-name event-data)
-                          (list 'task-line task-name (cdr (assoc task-name event-data)))
-                        line))
-                     (everything-else everything-else))))
+                     ((list 'task-line status task-name duration)
+                      (message "found task line")
+                      (cond ((assoc task-name event-data)
+                             (message "found new duration")
+                             (list 'task-line status task-name (cdr (assoc task-name event-data))))
+                            (:else
+                             (message (format "didn't find duration. %S %S" task-name event-data))
+                             line)))
+                     (everything-else (message (format "Something else %S" everything-else)) everything-else))))
     (clocker--rewrite-buffer pb)))
 
 (define-key clocker-mode-map (kbd "C-c C-c") 'clocker--go)
@@ -467,6 +517,8 @@ and creates a log of clock in and out events."
    (clocker--get-events-in-task-groups))
  (with-current-buffer (find-file-noselect "./test/tasks.txt")
    (clocker--get-task-durations-from-events))
+ (with-current-buffer (find-file-noselect "./test/tasks.txt")
+   (clocker--recalculate-durations))
  (with-current-buffer (find-file-noselect "./test/tasks.txt")
    (let ((files (directory-files "events" nil "[0-9]+\.csv")))
      (with-temp-buffer
