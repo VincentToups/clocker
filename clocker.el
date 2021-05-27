@@ -1,6 +1,7 @@
 (require 'shadchen)
 (require 'iso8601)
 (require 'parse-csv)
+(require 'org)
 
 (defun clocker--parse-csv-event-line (line)
   (match (parse-csv-string line ?, ?\")
